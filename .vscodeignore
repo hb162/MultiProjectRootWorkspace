@@ -1,0 +1,7 @@
+src/**
+dist/test/**
+plans/**
+.cursor/**
+.gitignore
+tsconfig.json
+*.vsix

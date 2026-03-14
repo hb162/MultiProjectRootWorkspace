@@ -1,0 +1,120 @@
+{
+  "name": "ai-first-api-impact-graph",
+  "displayName": "AI First API Impact Graph",
+  "description": "VS Code extension that builds a local API-to-test impact graph for multi-project workspaces.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/local/ai-first-api-impact-graph"
+  },
+  "license": "ISC",
+  "engines": {
+    "vscode": "^1.105.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "impactGraph.bootstrapProjects",
+        "title": "Impact Graph: Bootstrap Projects"
+      },
+      {
+        "command": "impactGraph.buildImpactGraph",
+        "title": "Impact Graph: Build Impact Graph"
+      },
+      {
+        "command": "impactGraph.refreshChanged",
+        "title": "Impact Graph: Refresh Changed"
+      },
+      {
+        "command": "impactGraph.findTests",
+        "title": "Impact Graph: Find Tests"
+      },
+      {
+        "command": "impactGraph.findCallers",
+        "title": "Impact Graph: Find Callers"
+      },
+      {
+        "command": "impactGraph.explainImpact",
+        "title": "Impact Graph: Explain Impact"
+      },
+      {
+        "command": "impactGraph.showApiMap",
+        "title": "Impact Graph: Show API Map"
+      },
+      {
+        "command": "impactGraph.saveContext",
+        "title": "Impact Graph: Save Context"
+      },
+      {
+        "command": "impactGraph.loadContext",
+        "title": "Impact Graph: Load Context"
+      },
+      {
+        "command": "impactGraph.graphStatus",
+        "title": "Impact Graph: Graph Status"
+      }
+    ],
+    "configuration": {
+      "title": "Impact Graph",
+      "properties": {
+        "impactGraph.ignoreDirectories": {
+          "type": "array",
+          "default": [
+            "node_modules",
+            "dist",
+            "build",
+            ".git",
+            ".next",
+            "coverage",
+            "target",
+            "bin",
+            "vendor"
+          ],
+          "description": "Directory names ignored during project scanning."
+        },
+        "impactGraph.projectManifestFiles": {
+          "type": "array",
+          "default": [
+            "pyproject.toml",
+            "package.json",
+            "pom.xml",
+            "go.mod"
+          ],
+          "description": "Manifest files used to detect nested project roots."
+        },
+        "impactGraph.contextDirectory": {
+          "type": "string",
+          "default": ".ai/kg/context",
+          "description": "Workspace-relative directory for saved context packets."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -w -p ./",
+    "test": "npm run compile && node --test dist/test/*.js"
+  },
+  "keywords": [
+    "vscode",
+    "extension",
+    "knowledge-graph",
+    "impact-analysis",
+    "api",
+    "testing"
+  ],
+  "dependencies": {
+    "better-sqlite3": "^12.6.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.5.2",
+    "@types/vscode": "^1.105.0",
+    "typescript": "^5.9.3"
+  }
+}
