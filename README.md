@@ -1,31 +1,12 @@
 # AI First API Impact Graph
 
-> A VS Code / Cursor / Kiro extension that helps AI instantly understand **which tests and functions across projects are affected when you modify an API or function** — without scanning the entire repo or burning through context tokens.
+> VS Code / Cursor / Kiro extension for **multi-project workspaces**. Helps AI see which tests and functions in other projects are affected when you modify an API or function.
 
 ---
 
 ## Purpose
 
-In a **multi-project workspace** (e.g. a Flask service + a Java Serenity BDD test suite), changing an API endpoint or a shared utility function can silently break tests in a completely different project. Without tooling, AI must grep the whole codebase to find these cross-project dependencies — expensive (10k–28k tokens), slow, and error-prone.
-
-This extension solves that by maintaining a **local knowledge graph** (SQLite) that maps relationships across projects:
-
-```
-Python function (utils.py)
-  → handler function (controller.py)
-    → Flask API endpoint  (/api/create)
-      → Java Task (calls the API)
-        → Java Test (Serenity BDD)
-```
-
-When AI needs to assess the impact of a change, it calls **one MCP tool** and gets a structured result — instead of reading dozens of files across multiple projects.
-
-**Measured benefit:**
-
-| Approach | Token cost | Accuracy |
-|---|---|---|
-| AI self-greps codebase | ~10,000–28,000 tokens | 60–80% |
-| KG query (this extension) | ~1,000 tokens | 90–96% |
+In a workspace with multiple projects (e.g. Flask service + Java test suite), changing an API or a shared function can impact another project. This extension builds a **local knowledge graph** (SQLite) that maps those relationships so AI can query impact via MCP instead of scanning the whole codebase.
 
 ---
 
