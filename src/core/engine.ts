@@ -2,19 +2,24 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { FlaskAdapter } from "../adapters/flask";
 import { HttpCallsiteAdapter } from "../adapters/httpCallsites";
+import { PythonAstAdapter } from "../adapters/pythonAst";
 import { GraphStore } from "./graph-store";
-import { ExtractedCallSite, GraphEdge, GraphNode, GraphSnapshot, ProjectContext } from "./types";
+import { ExtractedCallSite, ExtractedFunction, ExtractedImport, GraphEdge, GraphNode, GraphSnapshot, ProjectContext } from "./types";
 import { confidenceScore, detectLanguage, fileStem, hashText, shortLabel, stableId, uniqueBy } from "./utils";
 import { discoverProjects, listSourceFiles } from "./workspace";
 
 interface ProjectExtraction {
   snapshot: GraphSnapshot;
   callsites: ExtractedCallSite[];
+  functions: ExtractedFunction[];  // V2: Python function data for linking
+  imports: ExtractedImport[];      // V3: Python imports for cross-file linking
+  pythonFiles: string[];           // V3: All Python files for module resolution
 }
 
 export class ImpactGraphEngine {
   private readonly flaskAdapter = new FlaskAdapter();
   private readonly callsiteAdapter = new HttpCallsiteAdapter();
+  private readonly pythonAstAdapter = new PythonAstAdapter();  // V2
 
   public constructor(
     private readonly workspaceRoot: string | string[],
@@ -32,12 +37,45 @@ export class ImpactGraphEngine {
     const extractions = await Promise.all(projects.map((project) => this.extractProject(project)));
     const allApis = extractions.flatMap((entry) => entry.snapshot.nodes.filter((node) => node.kind === "api"));
 
+    // V2: Collect all function nodes for cross-file linking
+    const allFunctionNodes = extractions.flatMap((entry) =>
+      entry.snapshot.nodes.filter((node) => node.kind === "function"),
+    );
+
     for (const extraction of extractions) {
       const linked = this.linkCallsites(extraction.snapshot.project.id, extraction.callsites, allApis);
+
+      // V2: Link function → handler (if handler name matches function name)
+      const funcToHandlerEdges = this.linkFunctionsToHandlers(
+        extraction.snapshot.project.id,
+        extraction.snapshot.nodes.filter((n) => n.kind === "function"),
+        extraction.snapshot.nodes.filter((n) => n.kind === "handler"),
+      );
+
+      // V2: Create invokes edges between functions (same-file)
+      const invokesEdges = this.pythonAstAdapter.linkFunctionCalls(
+        extraction.snapshot.project.id,
+        extraction.functions,
+        extraction.snapshot.nodes.filter((n) => n.kind === "function"),
+      );
+
+      // V3: Create imports + invokes_qualified edges (cross-file)
+      const importEdges = this.pythonAstAdapter.linkImportsAndQualifiedCalls(
+        extraction.snapshot.project.id,
+        extraction.imports,
+        extraction.functions,
+        extraction.snapshot.nodes.filter((n) => n.kind === "function"),
+        extraction.snapshot.project.rootPath,
+        extraction.pythonFiles,
+      );
+
       const snapshot: GraphSnapshot = {
         ...extraction.snapshot,
         nodes: uniqueBy([...extraction.snapshot.nodes, ...linked.nodes], (node) => node.id),
-        edges: uniqueBy([...extraction.snapshot.edges, ...linked.edges], (edge) => edge.id),
+        edges: uniqueBy(
+          [...extraction.snapshot.edges, ...linked.edges, ...funcToHandlerEdges, ...invokesEdges, ...importEdges],
+          (edge) => edge.id,
+        ),
       };
       this.store.replaceSnapshot(snapshot);
     }
@@ -112,6 +150,9 @@ export class ImpactGraphEngine {
     const callsites = await this.callsiteAdapter.extract(project, files);
     const testData = await this.callsiteAdapter.extractTestData(project, files);
 
+    // V2: Extract Python functions with tree-sitter
+    const pythonAst = await this.pythonAstAdapter.extract(project, files);
+
     return {
       snapshot: {
         project: {
@@ -122,10 +163,13 @@ export class ImpactGraphEngine {
           frameworkHints: project.frameworkHints,
         },
         files: fingerprints,
-        nodes: uniqueBy([...baseNodes, ...flask.nodes], (node) => node.id),
-        edges: uniqueBy([...baseEdges, ...flask.edges], (edge) => edge.id),
+        nodes: uniqueBy([...baseNodes, ...flask.nodes, ...pythonAst.nodes], (node) => node.id),
+        edges: uniqueBy([...baseEdges, ...flask.edges, ...pythonAst.edges], (edge) => edge.id),
       },
       callsites: [...callsites, ...testData],
+      functions: pythonAst.functions,  // V2: pass function data for linking
+      imports: pythonAst.imports,      // V3: pass imports for cross-file linking
+      pythonFiles: files.filter((f) => f.endsWith(".py")),  // V3: for module resolution
     };
   }
 
@@ -371,5 +415,42 @@ export class ImpactGraphEngine {
       evidenceType,
       evidenceScore: confidence,
     };
+  }
+
+  /**
+   * V2: Link function nodes to handler nodes when they share the same name.
+   * This connects common_func → handler so we can trace function → API → test.
+   */
+  private linkFunctionsToHandlers(
+    projectId: string,
+    functionNodes: GraphNode[],
+    handlerNodes: GraphNode[],
+  ): GraphEdge[] {
+    const edges: GraphEdge[] = [];
+    const handlerByName = new Map<string, GraphNode>();
+
+    for (const handler of handlerNodes) {
+      handlerByName.set(handler.name, handler);
+    }
+
+    for (const func of functionNodes) {
+      const matchingHandler = handlerByName.get(func.name);
+      if (matchingHandler && func.sourcePath === matchingHandler.sourcePath) {
+        // Same name + same file = function IS the handler implementation
+        edges.push(
+          this.edge(
+            projectId,
+            "binds_handler",
+            func.id,
+            matchingHandler.id,
+            func.sourcePath,
+            0.98,
+            "ast_function_definition",
+          ),
+        );
+      }
+    }
+
+    return edges;
   }
 }

@@ -147,6 +147,25 @@ export class GraphStore {
     return rows.map(this.nodeFromRow);
   }
 
+  /**
+   * V2: Get all function nodes.
+   */
+  public getAllFunctions(): GraphNode[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT id, kind, name, project_id as projectId, source_path as sourcePath, language, framework,
+               normalized_path as normalizedPath, http_method as httpMethod, data_json
+        FROM nodes
+        WHERE kind = 'function'
+        ORDER BY source_path, name
+      `,
+      )
+      .all() as unknown as NodeRow[];
+
+    return rows.map(this.nodeFromRow);
+  }
+
   public getApisForQuery(query: string): GraphNode[] {
     const text = query.trim();
     const rows = this.db
@@ -221,6 +240,15 @@ export class GraphStore {
   }
 
   public getImpact(query: string): ImpactResult {
+    // V2: First check if query matches a function
+    const functions = this.getFunctionsForQuery(query);
+
+    if (functions.length > 0) {
+      // V2: Function query → find handlers that call this function → then APIs → then tests
+      return this.getImpactFromFunction(query, functions);
+    }
+
+    // V1 path: API or handler query
     const apis = this.resolveApis(query);
     const directHandlers = this.getHandlersForQuery(query);
     const resolvedApis = apis.length ? apis : this.resolveApisFromHandlers(directHandlers);
@@ -236,6 +264,273 @@ export class GraphStore {
       callers,
       tests,
     };
+  }
+
+  /**
+   * V3: Get impact chain from a function using BFS multi-hop traversal.
+   * function → (invokes/invokes_qualified) → ... → handler → API → test
+   *
+   * Supports up to 3 hops to handle layered architecture:
+   * common_func → service.func → controller.handler → API
+   */
+  private getImpactFromFunction(query: string, functions: GraphNode[]): ImpactResult {
+    const functionIds = functions.map((f) => f.id);
+
+    // V3: BFS to find all callers up to 3 hops
+    const { allCallers, handlers } = this.bfsTraceToHandlers(functionIds, 3);
+
+    // Get APIs bound to these handlers
+    const handlerIds = handlers.map((h) => h.node.id);
+    const apis = this.getApisForHandlerIds(handlerIds);
+    const apiIds = apis.map((a) => a.id);
+
+    // Get tests for these APIs (existing V1 logic)
+    const callers = this.getCallerRows(apiIds);
+    const tests = this.getTestRows(apiIds);
+
+    return {
+      query,
+      apis,
+      handlers: handlers.map((h) => h.node),
+      callers,
+      tests,
+      functions,
+      functionCallers: allCallers,
+    };
+  }
+
+  /**
+   * V3: BFS traversal to find all callers and handlers up to maxDepth hops.
+   * Follows both 'invokes' (same-file) and 'invokes_qualified' (cross-file) edges.
+   */
+  private bfsTraceToHandlers(
+    startFunctionIds: string[],
+    maxDepth: number,
+  ): {
+    allCallers: ImpactResult["callers"];
+    handlers: Array<{ node: GraphNode; confidence: number }>;
+  } {
+    const visited = new Set<string>();
+    const allCallers: ImpactResult["callers"] = [];
+    const handlers: Array<{ node: GraphNode; confidence: number }> = [];
+
+    // Queue: (nodeId, depth, accumulated confidence)
+    const queue: Array<{ nodeId: string; depth: number; confidence: number }> = [];
+
+    // Initialize with start functions
+    for (const id of startFunctionIds) {
+      queue.push({ nodeId: id, depth: 0, confidence: 1.0 });
+      visited.add(id);
+    }
+
+    const callerStmt = this.db.prepare(`
+      SELECT n.id, n.kind, n.name, n.project_id as projectId, n.source_path as sourcePath,
+             n.language, n.framework, n.normalized_path as normalizedPath, n.http_method as httpMethod, n.data_json,
+             e.confidence, e.kind as edgeKind
+      FROM edges e
+      JOIN nodes n ON n.id = e.from_id
+      WHERE e.kind IN ('invokes', 'invokes_qualified') AND e.to_id = ?
+    `);
+
+    while (queue.length > 0) {
+      const { nodeId, depth, confidence } = queue.shift()!;
+
+      if (depth >= maxDepth) continue;
+
+      const callerRows = callerStmt.all(nodeId) as unknown as Array<
+        NodeRow & { confidence: number; edgeKind: string }
+      >;
+
+      for (const row of callerRows) {
+        // Calculate new confidence with decay
+        // invokes (same-file): 0.92, invokes_qualified (cross-file): 0.88
+        const edgeConfidence = row.edgeKind === "invokes_qualified" ? 0.88 : 0.92;
+        const newConfidence = confidence * edgeConfidence;
+
+        const callerNode = this.nodeFromRow(row);
+
+        // Add to allCallers
+        allCallers.push({
+          node: callerNode,
+          confidence: newConfidence,
+          path: `function -> ${row.edgeKind} (${depth + 1} hop${depth > 0 ? "s" : ""})`,
+        });
+
+        // Check if this is a handler
+        if (this.isHandler(callerNode)) {
+          handlers.push({ node: callerNode, confidence: newConfidence });
+        }
+
+        // Continue BFS if not visited
+        if (!visited.has(row.id)) {
+          visited.add(row.id);
+          queue.push({
+            nodeId: row.id,
+            depth: depth + 1,
+            confidence: newConfidence,
+          });
+        }
+      }
+    }
+
+    return { allCallers, handlers };
+  }
+
+  /**
+   * V2: Find functions matching the query.
+   */
+  private getFunctionsForQuery(query: string): GraphNode[] {
+    const text = query.trim();
+    const rows = this.db
+      .prepare(
+        `
+        SELECT id, kind, name, project_id as projectId, source_path as sourcePath, language, framework,
+               normalized_path as normalizedPath, http_method as httpMethod, data_json
+        FROM nodes
+        WHERE kind = 'function'
+          AND (
+            name LIKE @likeQuery OR
+            name = @exactQuery
+          )
+      `,
+      )
+      .all({
+        likeQuery: `%${text}%`,
+        exactQuery: text,
+      }) as unknown as NodeRow[];
+
+    return rows.map(this.nodeFromRow);
+  }
+
+  /**
+   * V3: Find functions/handlers that invoke the given functions.
+   * Includes both same-file (invokes) and cross-file (invokes_qualified) calls.
+   */
+  private getFunctionCallers(functionIds: string[]): ImpactResult["callers"] {
+    if (functionIds.length === 0) return [];
+
+    const placeholders = functionIds.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(
+        `
+        SELECT n.id, n.kind, n.name, n.project_id as projectId, n.source_path as sourcePath,
+               n.language, n.framework, n.normalized_path as normalizedPath, n.http_method as httpMethod, n.data_json,
+               e.confidence, e.kind as edgeKind
+        FROM edges e
+        JOIN nodes n ON n.id = e.from_id
+        WHERE e.kind IN ('invokes', 'invokes_qualified') AND e.to_id IN (${placeholders})
+      `,
+      )
+      .all(...functionIds) as unknown as Array<NodeRow & { confidence: number; edgeKind: string }>;
+
+    return rows.map((row) => ({
+      node: this.nodeFromRow(row),
+      confidence: row.confidence,
+      path: `function -> ${row.edgeKind} -> ${row.name}`,
+    }));
+  }
+
+  /**
+   * V3: Check if a function node is also a handler (bound to an API).
+   * A function is a handler if there's a handler node with same name + same file
+   * that is linked to an API via binds_handler.
+   */
+  private isHandler(funcNode: GraphNode): boolean {
+    // First check if this node itself is connected to binds_handler
+    const directRow = this.db
+      .prepare(
+        `
+        SELECT 1 FROM edges
+        WHERE kind = 'binds_handler' AND (from_id = ? OR to_id = ?)
+        LIMIT 1
+      `,
+      )
+      .get(funcNode.id, funcNode.id) as DbRow | undefined;
+
+    if (directRow !== undefined) return true;
+
+    // V3: Check if there's a handler node with same name + same file
+    // Function nodes and handler nodes are separate, but they represent the same code
+    const handlerRow = this.db
+      .prepare(
+        `
+        SELECT 1 FROM nodes n
+        JOIN edges e ON (e.to_id = n.id AND e.kind = 'binds_handler')
+        WHERE n.kind = 'handler'
+          AND n.name = ?
+          AND n.source_path = ?
+        LIMIT 1
+      `,
+      )
+      .get(funcNode.name, funcNode.sourcePath) as DbRow | undefined;
+
+    return handlerRow !== undefined;
+  }
+
+  /**
+   * V3: Find handlers that call the given intermediate functions (multi-level chain).
+   * Now uses BFS in getImpactFromFunction, keeping this for compatibility.
+   */
+  private getIndirectHandlerCallers(intermediateFuncIds: string[]): GraphNode[] {
+    if (intermediateFuncIds.length === 0) return [];
+
+    const placeholders = intermediateFuncIds.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(
+        `
+        SELECT DISTINCT n.id, n.kind, n.name, n.project_id as projectId, n.source_path as sourcePath,
+               n.language, n.framework, n.normalized_path as normalizedPath, n.http_method as httpMethod, n.data_json
+        FROM edges e
+        JOIN nodes n ON n.id = e.from_id
+        WHERE e.kind IN ('invokes', 'invokes_qualified') AND e.to_id IN (${placeholders})
+          AND EXISTS (
+            SELECT 1 FROM edges e2 WHERE e2.kind = 'binds_handler' AND (e2.from_id = n.id OR e2.to_id = n.id)
+          )
+      `,
+      )
+      .all(...intermediateFuncIds) as unknown as NodeRow[];
+
+    return rows.map(this.nodeFromRow);
+  }
+
+  /**
+   * V3: Get APIs bound to handlers identified by their IDs.
+   * Handler IDs may be function nodes (from BFS) — need to match by name + file to find actual handler nodes.
+   */
+  private getApisForHandlerIds(handlerIds: string[]): GraphNode[] {
+    if (handlerIds.length === 0) return [];
+
+    // First, get all the function nodes to extract their names and paths
+    const placeholders = handlerIds.map(() => "?").join(", ");
+    const funcRows = this.db
+      .prepare(
+        `SELECT name, source_path FROM nodes WHERE id IN (${placeholders})`,
+      )
+      .all(...handlerIds) as Array<{ name: string; source_path: string }>;
+
+    if (funcRows.length === 0) return [];
+
+    // Build conditions for name + source_path pairs
+    const conditions = funcRows
+      .map(() => "(h.name = ? AND h.source_path = ?)")
+      .join(" OR ");
+    const conditionParams = funcRows.flatMap((r) => [r.name, r.source_path]);
+
+    // Find APIs via handler nodes that match by name + file
+    const rows = this.db
+      .prepare(
+        `
+        SELECT DISTINCT api.id, api.kind, api.name, api.project_id as projectId, api.source_path as sourcePath,
+               api.language, api.framework, api.normalized_path as normalizedPath, api.http_method as httpMethod, api.data_json
+        FROM nodes h
+        JOIN edges e ON e.to_id = h.id AND e.kind = 'binds_handler'
+        JOIN nodes api ON api.id = e.from_id AND api.kind = 'api'
+        WHERE h.kind = 'handler' AND (${conditions})
+      `,
+      )
+      .all(...conditionParams) as unknown as NodeRow[];
+
+    return rows.map(this.nodeFromRow);
   }
 
   private resolveApisFromHandlers(handlers: GraphNode[]): GraphNode[] {

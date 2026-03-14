@@ -47,15 +47,17 @@ const TOOLS = [
   {
     name: "query_impact",
     description:
-      "Full impact analysis for an API or handler. Returns the source file, handler function, callers, and affected test files. " +
-      "Use this when asked to fix/modify any API — it tells you exactly what to change and what tests to update.",
+      "Full impact analysis for an API, handler, or Python function. Returns affected APIs, handlers, callers, and test files. " +
+      "V2: Now supports function queries — e.g. 'common_func' will trace function → handler → API → test chain. " +
+      "Use this when asked to fix/modify any API or function — it tells you exactly what to change and what tests to update.",
     inputSchema: {
       type: "object",
       properties: {
         query: {
           type: "string",
           description:
-            "API path (e.g. /i/v1/user/create or POST /i/v1/user/create) or handler function name (e.g. create_user)",
+            "API path (e.g. /list_all or GET /list_all), handler function name (e.g. list_transactions), " +
+            "or any Python function name (e.g. common_func, validate_data)",
         },
       },
       required: ["query"],
@@ -76,15 +78,34 @@ const TOOLS = [
     },
   },
   {
+    name: "list_functions",
+    description:
+      "V2: List all tracked Python functions. Use to discover internal functions that may affect APIs. " +
+      "Useful when user asks about function dependencies or wants to see what functions exist in a project.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: {
+          type: "string",
+          description: "Optional: filter by project name or project ID substring",
+        },
+        file: {
+          type: "string",
+          description: "Optional: filter by source file path (e.g. 'utils.py' or 'controller')",
+        },
+      },
+    },
+  },
+  {
     name: "find_tests",
     description:
-      "Find test files that cover a specific API or handler. More focused than query_impact — returns only tests.",
+      "Find test files that cover a specific API, handler, or function. More focused than query_impact — returns only tests.",
     inputSchema: {
       type: "object",
       properties: {
         query: {
           type: "string",
-          description: "API path or handler name",
+          description: "API path, handler name, or function name",
         },
       },
       required: ["query"],
@@ -93,7 +114,7 @@ const TOOLS = [
   {
     name: "graph_status",
     description:
-      "Check if the impact graph has been built and show statistics (projects, files, nodes, edges). " +
+      "Check if the impact graph has been built and show statistics (projects, files, nodes, edges, functions). " +
       "Call this first if unsure whether the graph is ready.",
     inputSchema: {
       type: "object",
@@ -104,6 +125,7 @@ const TOOLS = [
     name: "build_graph",
     description:
       "Trigger a full rebuild of the impact graph across all configured workspace roots. " +
+      "V2: Now includes Python function extraction with tree-sitter for function-level tracking. " +
       "Use when: (1) graph is empty/outdated after code changes, (2) first-time setup, (3) after adding new projects. " +
       "Returns status after build completes.",
     inputSchema: {
@@ -135,17 +157,40 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
       return apis;
     }
 
+    case "list_functions": {
+      const functions = s.getAllFunctions();
+      let filtered = functions;
+
+      if (args.project) {
+        const filter = (args.project as string).toLowerCase();
+        filtered = filtered.filter(
+          (f) => f.projectId.toLowerCase().includes(filter) || f.name.toLowerCase().includes(filter),
+        );
+      }
+
+      if (args.file) {
+        const fileFilter = (args.file as string).toLowerCase();
+        filtered = filtered.filter((f) => f.sourcePath.toLowerCase().includes(fileFilter));
+      }
+
+      return filtered;
+    }
+
     case "find_tests": {
       const impact = s.getImpact(args.query as string);
       return { query: impact.query, tests: impact.tests };
     }
 
-    case "graph_status":
-      return { ...s.getStatus(), roots: rawRoots };
+    case "graph_status": {
+      const status = s.getStatus();
+      const functionCount = s.getAllFunctions().length;
+      return { ...status, functions: functionCount, roots: rawRoots };
+    }
 
     case "build_graph": {
       const status = await getEngine().buildAll();
-      return { ...status, roots: rawRoots, message: "Graph rebuilt successfully." };
+      const functionCount = s.getAllFunctions().length;
+      return { ...status, functions: functionCount, roots: rawRoots, message: "Graph rebuilt successfully." };
     }
 
     default:
