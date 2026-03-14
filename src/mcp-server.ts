@@ -9,7 +9,9 @@
  *   2. process.cwd() (Cursor sets CWD = workspace root)
  */
 import * as readline from "readline";
+import * as path from "path";
 import { GraphStore } from "./core/graph-store";
+import { GraphNode, ImpactResult } from "./core/types";
 
 // Support single root (WORKSPACE_ROOT) or multiple comma-separated roots
 // (WORKSPACE_ROOTS). The first root is used for DB storage.
@@ -66,6 +68,11 @@ const TOOLS = [
             "API path (e.g. /list_all or GET /list_all), handler function name (e.g. list_transactions), " +
             "or any Python function name (e.g. common_func, validate_data)",
         },
+        format: {
+          type: "string",
+          enum: ["compact", "full"],
+          description: "Response format: 'compact' (default) = AI-optimized line-based format, 'full' = detailed JSON",
+        },
       },
       required: ["query"],
     },
@@ -80,6 +87,11 @@ const TOOLS = [
         project: {
           type: "string",
           description: "Optional: filter by project name or project ID substring",
+        },
+        format: {
+          type: "string",
+          enum: ["compact", "full"],
+          description: "Response format: 'compact' (default) = AI-optimized line-based format, 'full' = detailed JSON",
         },
       },
     },
@@ -100,6 +112,11 @@ const TOOLS = [
           type: "string",
           description: "Optional: filter by source file path (e.g. 'utils.py' or 'controller')",
         },
+        format: {
+          type: "string",
+          enum: ["compact", "full"],
+          description: "Response format: 'compact' (default) = AI-optimized line-based format, 'full' = detailed JSON",
+        },
       },
     },
   },
@@ -113,6 +130,11 @@ const TOOLS = [
         query: {
           type: "string",
           description: "API path, handler name, or function name",
+        },
+        format: {
+          type: "string",
+          enum: ["compact", "full"],
+          description: "Response format: 'compact' (default) = AI-optimized line-based format, 'full' = detailed JSON",
         },
       },
       required: ["query"],
@@ -143,30 +165,128 @@ const TOOLS = [
 ];
 
 // ---------------------------------------------------------------------------
+// Compact Line-based Formatters (AI-optimized)
+// ---------------------------------------------------------------------------
+
+function getRelativePath(sourcePath: string): string {
+  // Extract last 2-3 path segments for readability
+  const segments = sourcePath.split(/[/\\]/);
+  return segments.slice(-3).join("/");
+}
+
+function formatNodeLine(prefix: string, node: GraphNode, confidence?: number): string {
+  const relPath = getRelativePath(node.sourcePath);
+  const lines = node.data?.startLine
+    ? `:${node.data.startLine}${node.data.endLine !== node.data.startLine ? `-${node.data.endLine}` : ""}`
+    : "";
+  const method = node.httpMethod ? `${node.httpMethod} ` : "";
+  const apiPath = node.normalizedPath ? `${node.normalizedPath} ` : "";
+  const conf = confidence !== undefined ? ` [${confidence.toFixed(2)}]` : "";
+  
+  return `${prefix}: ${method}${apiPath}${node.name} @ ${relPath}${lines}${conf}`;
+}
+
+function formatImpactCompact(result: ImpactResult): string {
+  const lines: string[] = [];
+  
+  lines.push(`IMPACT: ${result.query}`);
+  lines.push("---");
+  
+  // APIs
+  for (const api of result.apis) {
+    lines.push(formatNodeLine("API", api));
+  }
+  
+  // Handlers
+  for (const handler of result.handlers) {
+    lines.push(formatNodeLine("HANDLER", handler));
+  }
+  
+  // Functions (V2)
+  if (result.functions?.length) {
+    for (const func of result.functions) {
+      lines.push(formatNodeLine("FUNC", func));
+    }
+  }
+  
+  // Function callers (V2)
+  if (result.functionCallers?.length) {
+    for (const caller of result.functionCallers) {
+      lines.push(formatNodeLine("FUNC_CALLER", caller.node, caller.confidence));
+    }
+  }
+  
+  // Callers
+  for (const caller of result.callers) {
+    lines.push(formatNodeLine("CALLER", caller.node, caller.confidence));
+  }
+  
+  // Tests
+  for (const test of result.tests) {
+    lines.push(formatNodeLine("TEST", test.node, test.confidence));
+  }
+  
+  lines.push("---");
+  lines.push(`SUMMARY: ${result.apis.length}A ${result.handlers.length}H ${result.tests.length}T ${result.callers.length}C${result.functions?.length ? ` ${result.functions.length}F` : ""}`);
+  
+  return lines.join("\n");
+}
+
+function formatNodesCompact(prefix: string, nodes: GraphNode[]): string {
+  if (nodes.length === 0) {
+    return `${prefix}: (none)`;
+  }
+  const lines = nodes.map((node) => formatNodeLine(prefix, node));
+  lines.push(`---`);
+  lines.push(`TOTAL: ${nodes.length}`);
+  return lines.join("\n");
+}
+
+function formatTestsCompact(query: string, tests: ImpactResult["tests"]): string {
+  const lines: string[] = [];
+  lines.push(`TESTS_FOR: ${query}`);
+  lines.push("---");
+  
+  if (tests.length === 0) {
+    lines.push("(none)");
+  } else {
+    for (const test of tests) {
+      lines.push(formatNodeLine("TEST", test.node, test.confidence));
+    }
+  }
+  
+  lines.push("---");
+  lines.push(`TOTAL: ${tests.length}`);
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
 // Tool execution
 // ---------------------------------------------------------------------------
 
 async function callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
   const s = await getStore();
+  const format = (args.format as string) ?? "compact";
 
   switch (name) {
-    case "query_impact":
-      return s.getImpact(args.query as string);
+    case "query_impact": {
+      const result = s.getImpact(args.query as string);
+      return format === "compact" ? formatImpactCompact(result) : result;
+    }
 
     case "list_apis": {
-      const apis = s.getAllApis();
+      let apis = s.getAllApis();
       if (args.project) {
         const filter = (args.project as string).toLowerCase();
-        return apis.filter(
+        apis = apis.filter(
           (a) => a.projectId.toLowerCase().includes(filter) || a.name.toLowerCase().includes(filter),
         );
       }
-      return apis;
+      return format === "compact" ? formatNodesCompact("API", apis) : apis;
     }
 
     case "list_functions": {
-      const functions = s.getAllFunctions();
-      let filtered = functions;
+      let filtered = s.getAllFunctions();
 
       if (args.project) {
         const filter = (args.project as string).toLowerCase();
@@ -180,12 +300,14 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
         filtered = filtered.filter((f) => f.sourcePath.toLowerCase().includes(fileFilter));
       }
 
-      return filtered;
+      return format === "compact" ? formatNodesCompact("FUNC", filtered) : filtered;
     }
 
     case "find_tests": {
       const impact = s.getImpact(args.query as string);
-      return { query: impact.query, tests: impact.tests };
+      return format === "compact" 
+        ? formatTestsCompact(args.query as string, impact.tests)
+        : { query: impact.query, tests: impact.tests };
     }
 
     case "graph_status": {
