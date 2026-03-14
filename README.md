@@ -1,57 +1,65 @@
 # AI First API Impact Graph
 
-> VS Code / Cursor / Kiro extension giúp AI biết ngay "sửa API này thì test nào bị ảnh hưởng" — không cần scan toàn repo, không tốn token.
+> A VS Code / Cursor / Kiro extension that helps AI instantly understand **which tests and functions across projects are affected when you modify an API or function** — without scanning the entire repo or burning through context tokens.
 
 ---
 
-## Mục Đích
+## Purpose
 
-Khi làm việc với **multi-project workspace** (ví dụ: Flask service + Java Serenity BDD auto test), việc sửa một API hoặc handler function có thể ảnh hưởng đến nhiều test ở project khác. AI rất khó phát hiện điều này một cách chủ động vì phải grep toàn bộ codebase — tốn hàng chục nghìn token, chậm, và dễ miss.
+In a **multi-project workspace** (e.g. a Flask service + a Java Serenity BDD test suite), changing an API endpoint or a shared utility function can silently break tests in a completely different project. Without tooling, AI must grep the whole codebase to find these cross-project dependencies — expensive (10k–28k tokens), slow, and error-prone.
 
-Extension này giải quyết bài toán bằng cách xây một **knowledge graph cục bộ** (lưu bằng SQLite), ánh xạ mối quan hệ:
+This extension solves that by maintaining a **local knowledge graph** (SQLite) that maps relationships across projects:
 
 ```
-Flask API endpoint
-  → handler function
-    → Java Task (call API)
-      → Java Test (Serenity BDD)
+Python function (utils.py)
+  → handler function (controller.py)
+    → Flask API endpoint  (/api/create)
+      → Java Task (calls the API)
+        → Java Test (Serenity BDD)
 ```
 
-AI chỉ cần gọi **1 MCP tool** để nhận kết quả có cấu trúc — thay vì đọc hàng chục file.
+When AI needs to assess the impact of a change, it calls **one MCP tool** and gets a structured result — instead of reading dozens of files across multiple projects.
 
-**Lợi ích đo được:**
+**Measured benefit:**
 
-| Cách làm | Token tiêu thụ | Độ chính xác |
+| Approach | Token cost | Accuracy |
 |---|---|---|
-| AI tự grep codebase | ~10,000–28,000 tokens | 60–80% |
-| KG query (extension này) | ~1,000 tokens | 90–96% |
+| AI self-greps codebase | ~10,000–28,000 tokens | 60–80% |
+| KG query (this extension) | ~1,000 tokens | 90–96% |
 
 ---
 
-## Công Nghệ Sử Dụng
+## How It Works
 
-| Thành phần | Công nghệ |
+1. **Build phase** — the extension scans all configured project roots, extracts API endpoints, handler functions, HTTP call sites, test files, and Python functions. It stores them as nodes and edges in a local SQLite graph.
+2. **Query phase** — AI calls `query_impact("create_user")` via MCP and gets back which APIs, handlers, callers, and tests are affected. No file scanning required.
+3. **Refresh** — on file save or manual command, only the changed project is re-indexed.
+
+---
+
+## Tech Stack
+
+| Component | Technology |
 |---|---|
 | Extension runtime | **TypeScript**, VS Code Extension API |
-| Graph storage | **SQLite** (`node:sqlite` built-in Node 22+ hoặc `better-sqlite3` fallback) |
-| API extraction | Regex adapter cho **Flask** (Python), **HTTP callsite** scanner cho Java/Go/TS/JS |
-| Test framework hỗ trợ | **Java Serenity BDD** (`*Test.java`, `*Task.java`, `*Qst.java`, `*Entity.java`, `*Matcher.java`) |
-| AI integration | **Model Context Protocol (MCP)** — stdio JSON-RPC server |
+| Graph storage | **SQLite** (`node:sqlite` Node 23.4+ or `sql.js` WASM fallback — no native binaries, cross-platform) |
+| Python extraction | Regex adapter for **Flask** routes + **tree-sitter** AST for function/import tracking |
+| Cross-language scanner | HTTP call-site detector for Java / Go / TypeScript / JavaScript |
+| Test framework | **Java Serenity BDD** (`*Test.java`, `*Task.java`, `*Qst.java`, `*Entity.java`, `*Matcher.java`) |
+| AI integration | **Model Context Protocol (MCP)** — stdio JSON-RPC 2.0 server |
 | Packaging | `@vscode/vsce` → `.vsix` |
-| Build tool | `tsc` (TypeScript compiler) |
-| Test | Node.js built-in test runner |
 
 ---
 
-## Clone và Phát Triển Thêm
+## Development Setup
 
-### Yêu cầu
+### Prerequisites
 
-- **Node.js** >= 18 (khuyến nghị 22+ để dùng `node:sqlite` built-in)
+- **Node.js** >= 18 (22+ recommended for `node:sqlite` built-in)
 - **npm** >= 9
-- **VS Code** >= 1.105 hoặc Cursor / Kiro
+- **VS Code** >= 1.85, or Cursor / Kiro
 
-### Clone
+### Clone & Build
 
 ```bash
 git clone <repo-url> MultiprojectWorkspaceExtension
@@ -60,78 +68,79 @@ npm install
 npm run compile
 ```
 
-### Cấu trúc source
+### Source Layout
 
 ```
 src/
-  extension.ts          ← VS Code entry point, đăng ký commands
-  mcp-server.ts         ← MCP stdio server cho AI gọi trực tiếp
+  extension.ts          ← VS Code entry point, registers commands
+  mcp-server.ts         ← MCP stdio server for AI to call directly
   core/
-    engine.ts           ← Orchestration: build graph, link callsites
+    engine.ts           ← Orchestration: build graph, link call sites
     graph-store.ts      ← SQLite read/write (nodes, edges, snapshots)
-    db-adapter.ts       ← Abstraction layer: node:sqlite hoặc better-sqlite3
-    workspace.ts        ← Phát hiện project roots và source files
-    types.ts            ← TypeScript interfaces (GraphNode, GraphEdge, ...)
-    utils.ts            ← Hash, normalize path, confidence score, ...
+    db-adapter.ts       ← node:sqlite (fast) or sql.js WASM (universal fallback)
+    workspace.ts        ← Discovers project roots and source files
+    types.ts            ← TypeScript interfaces (GraphNode, GraphEdge, …)
+    utils.ts            ← Hashing, path normalisation, confidence scoring
   adapters/
-    flask.ts            ← Extract Flask routes từ Python controller files
-    httpCallsites.ts    ← Detect HTTP calls + Serenity BDD patterns trong Java/TS/Go/JS
+    flask.ts            ← Extracts Flask routes from Python controller files
+    httpCallsites.ts    ← Detects HTTP calls + Serenity BDD patterns in Java/TS/Go/JS
+    pythonAst.ts        ← tree-sitter AST: Python function definitions, imports, qualified calls
 ```
 
-### Workflow phát triển
+### Dev Workflow
 
 ```bash
-npm run watch     # tự động recompile khi thay đổi file .ts
+npm run watch     # auto-recompile on .ts changes
 ```
 
-Sau đó nhấn `F5` trong VS Code để mở **Extension Development Host** và test trực tiếp.
+Press `F5` in VS Code to open the **Extension Development Host** and test live.
 
 ```bash
-npm test          # chạy unit tests
+npm test          # run unit tests
 ```
 
-### Thêm adapter cho framework mới
+### Adding a New Framework Adapter
 
-1. Tạo file `src/adapters/<framework>.ts` implement interface:
+1. Create `src/adapters/<framework>.ts` implementing:
    ```typescript
    extract(project: ProjectContext, files: string[]): Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }>
    ```
-2. Đăng ký adapter trong `src/core/engine.ts`.
-3. Cập nhật `src/core/workspace.ts` nếu cần detect manifest file mới.
+2. Register the adapter in `src/core/engine.ts`.
+3. Update `src/core/workspace.ts` if the new framework uses a different manifest file.
 
 ---
 
-## Cài Đặt
+## Installation
 
-### Cách A — Build VSIX và cài local (khuyến nghị)
+### Option A — Build VSIX and install locally (recommended)
 
 ```bash
-# 1. Cài vsce nếu chưa có
+# 1. Install vsce if not already installed
 npm install -g @vscode/vsce
 
-# 2. Build file .vsix
+# 2. Build the .vsix package
 npm run compile
 npx @vscode/vsce package --allow-missing-repository
-# → sinh ra: ai-first-api-impact-graph-0.1.0.vsix
+# → produces: ai-first-api-impact-graph-0.1.0.vsix
 
-# 3. Cài vào editor
+# 3. Install into your editor
 code --install-extension ai-first-api-impact-graph-0.1.0.vsix
-# hoặc Cursor:
+# or Cursor:
 cursor --install-extension ai-first-api-impact-graph-0.1.0.vsix
-# hoặc Kiro: Extensions → Install from VSIX → chọn file .vsix
+# or Kiro: Extensions → Install from VSIX → select the .vsix file
 ```
 
-### Cách B — Chạy trực tiếp qua Extension Development Host (dùng khi dev)
+### Option B — Run via Extension Development Host (for development)
 
-1. Mở thư mục `MultiprojectWorkspaceExtension` trong VS Code/Cursor.
-2. Nhấn `F5` → cửa sổ **Extension Development Host** mở ra.
-3. Trong cửa sổ đó, mở workspace multi-project của bạn.
+1. Open the `MultiprojectWorkspaceExtension` folder in VS Code/Cursor.
+2. Press `F5` → the **Extension Development Host** window opens.
+3. In that window, open your multi-project workspace.
 
 ---
 
-## Cấu Hình MCP Server (để AI tự gọi)
+## MCP Server Configuration (for AI auto-use)
 
-Sau khi cài extension, cấu hình MCP server để Cursor/Kiro/Claude gọi được graph tools mà không cần human can thiệp.
+After installing the extension, configure the MCP server so that Cursor / Kiro / Claude can call the graph tools autonomously — no human intervention needed.
 
 ### Cursor — `.cursor/mcp.json`
 
@@ -165,33 +174,34 @@ Sau khi cài extension, cấu hình MCP server để Cursor/Kiro/Claude gọi đ
 }
 ```
 
-> `WORKSPACE_ROOTS`: danh sách đường dẫn tuyệt đối tới các project roots, cách nhau bằng dấu phẩy.
+> `WORKSPACE_ROOTS`: comma-separated list of absolute paths to all project roots in your workspace.
 
-### MCP Tools có sẵn
+### Available MCP Tools
 
-| Tool | Mô tả |
+| Tool | Description |
 |---|---|
-| `graph_status` | Kiểm tra graph đã build chưa, xem thống kê nodes/edges |
-| `build_graph` | Trigger rebuild graph toàn bộ |
-| `query_impact` | Phân tích đầy đủ impact của 1 API hoặc handler |
-| `list_apis` | Liệt kê tất cả API đang được track |
-| `find_tests` | Tìm test files liên quan đến 1 API |
+| `graph_status` | Check whether the graph is built; show node/edge/function counts |
+| `build_graph` | Trigger a full graph rebuild across all roots |
+| `query_impact` | Full impact analysis for an API path, handler, or Python function |
+| `list_apis` | List all tracked API endpoints |
+| `list_functions` | List all tracked Python functions |
+| `find_tests` | Find test files related to a specific API or function |
 
 ---
 
-## Cách Sử Dụng (VS Code Commands)
+## VS Code Commands
 
-Mở Command Palette (`Cmd+Shift+P`) và gõ `Impact Graph`:
+Open Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`) and type `Impact Graph`:
 
-| Command | Tác dụng |
+| Command | Action |
 |---|---|
-| `Impact Graph: Build Impact Graph` | Build graph lần đầu hoặc rebuild toàn bộ |
-| `Impact Graph: Find Tests` | Nhập API path hoặc handler name → tìm tests bị ảnh hưởng |
-| `Impact Graph: Explain Impact` | Giải thích đầy đủ với confidence score |
-| `Impact Graph: Graph Status` | Xem số node/edge trong graph |
-| `Impact Graph: Refresh Changed` | Re-index project của file đang mở |
+| `Impact Graph: Build Impact Graph` | First-time build or full rebuild |
+| `Impact Graph: Find Tests` | Enter an API path or handler name → find affected tests |
+| `Impact Graph: Explain Impact` | Full impact explanation with confidence scores |
+| `Impact Graph: Graph Status` | View node/edge counts |
+| `Impact Graph: Refresh Changed` | Re-index the project containing the currently open file |
 
-### Ví dụ output
+### Example Output
 
 ```json
 {
@@ -201,54 +211,56 @@ Mở Command Palette (`Cmd+Shift+P`) và gõ `Impact Graph`:
   "callers": [
     { "name": "TransactionTask /list_all", "file": "TransactionTask.java", "confidence": 0.965 }
   ],
-  "affectedTests": [
-    { "name": "TransactionTest", "file": "TransactionTest.java", "confidence": 0.9025, "path": "test -> uses_task -> task -> calls_api -> api" }
+  "tests": [
+    { "name": "TransactionTest", "file": "TransactionTest.java", "confidence": 0.9025 }
   ]
 }
 ```
 
 ---
 
-## Cấu Trúc Workspace Được Hỗ Trợ
+## Supported Workspace Layout
 
-Extension tự phát hiện project roots dựa trên manifest files:
+The extension auto-discovers project roots based on manifest files (`pyproject.toml`, `pom.xml`, `go.mod`, `package.json`):
 
 ```
 my-workspace/
   flask-service/
-    pyproject.toml     ← Python/Flask project
-    app.py             ← đăng ký prefix cho controllers
-    user_controller.py ← khai báo routes
+    pyproject.toml     ← Python/Flask project root
+    app.py             ← registers route prefixes for controllers
+    user_controller.py ← declares routes
+    util/
+      utils.py         ← shared utility functions (tracked by graph)
   java-autotest/
-    pom.xml            ← Java project (Serenity BDD)
+    pom.xml            ← Java project root (Serenity BDD)
     src/test/java/
-      UserTask.java    ← gọi API Flask
+      UserTask.java    ← calls Flask API
       UserTest.java    ← test runner
       UserQst.java     ← logic helper
       UserEntity.java  ← DB query helper
       UserMatcher.java ← comparison helper
   go-service/
-    go.mod             ← Go project
+    go.mod             ← Go project root
   ts-frontend/
-    package.json       ← JS/TS project
+    package.json       ← JS/TS project root
 ```
 
 ---
 
-## Giới Hạn Hiện Tại (v0.1)
+## Current Limitations (v0.1)
 
-- Flask extraction yêu cầu `app.py` đăng ký prefix theo dạng `(controller_var, "/prefix")`.
-- Chỉ extract API server-side từ Flask; Java/Go/TS/JS đóng vai trò call-site scanner.
-- Caller detection dựa trên literal HTTP string — không phát hiện được URL dynamic hoặc generated client.
-- Function-level intra-project tracking (ví dụ: `utils.py::common_func`) chưa được hỗ trợ — đây là v2 feature cần tree-sitter AST parsing.
-- Graph lưu tại `.ai/kg/index.db` trong folder đầu tiên của `WORKSPACE_ROOTS`.
+- Flask extraction requires `app.py` to register route prefixes in the form `(controller_var, "/prefix")`.
+- Only Flask is used as an API server extractor; Java/Go/TS/JS are treated as call-site scanners.
+- Caller detection is based on literal HTTP strings — dynamic or generated URLs are not detected.
+- Cross-project function tracking only works for Python (via tree-sitter AST); Java/Go/TS/JS function tracking is not yet implemented.
+- The graph database is stored at `.ai/kg/index.db` inside the first folder listed in `WORKSPACE_ROOTS`.
 
 ---
 
-## Artifacts Sinh Ra
+## Generated Artifacts
 
 ```
 .ai/
   kg/
-    index.db    ← SQLite graph (thêm vào .gitignore)
+    index.db    ← SQLite graph database (add to .gitignore)
 ```
