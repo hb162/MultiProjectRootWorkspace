@@ -109,12 +109,11 @@
     "testing"
   ],
   "dependencies": {
-    "better-sqlite3": "^12.6.2",
+    "sql.js": "^1.14.1",
     "tree-sitter": "^0.25.0",
     "tree-sitter-python": "^0.25.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.12.0",
     "@types/vscode": "^1.85.0",
     "typescript": "^5.9.3"

@@ -9,27 +9,36 @@ export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("Impact Graph");
 
   // Lazy-init: defer GraphStore/Engine creation to first command use so that
-  // commands are always registered even if native deps fail to load.
+  // commands are always registered even if the SQLite backend fails to load.
   let store: GraphStore | null = null;
   let engine: ImpactGraphEngine | null = null;
   let registry: CommandRegistry | null = null;
   let initError: string | null = null;
+  // Cache the pending init promise to prevent double-initialisation on
+  // concurrent command invocations.
+  let initPromise: Promise<CommandRegistry | null> | null = null;
 
-  function getRegistry(): CommandRegistry | null {
+  async function getRegistry(): Promise<CommandRegistry | null> {
     if (registry) return registry;
     if (initError) return null;
-    try {
-      store = new GraphStore(workspaceRoot, contextDirectory);
-      engine = new ImpactGraphEngine(workspaceRoot, store);
-      registry = new CommandRegistry(engine, store);
-      return registry;
-    } catch (err) {
-      initError = String(err);
-      vscode.window.showErrorMessage(`Impact Graph failed to initialize: ${initError}`);
-      output.appendLine(`[ERROR] Initialization failed: ${initError}`);
-      output.show(true);
-      return null;
-    }
+    if (initPromise) return initPromise;
+
+    initPromise = (async () => {
+      try {
+        store = await GraphStore.create(workspaceRoot, contextDirectory);
+        engine = new ImpactGraphEngine(workspaceRoot, store);
+        registry = new CommandRegistry(engine, store);
+        return registry;
+      } catch (err) {
+        initError = String(err);
+        vscode.window.showErrorMessage(`Impact Graph failed to initialize: ${initError}`);
+        output.appendLine(`[ERROR] Initialization failed: ${initError}`);
+        output.show(true);
+        return null;
+      }
+    })();
+
+    return initPromise;
   }
 
   context.subscriptions.push(output);
@@ -58,19 +67,19 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   register(COMMAND_IDS.bootstrapProjects, async () => {
-    const r = getRegistry(); if (!r) return;
+    const r = await getRegistry(); if (!r) return;
     const result = await r.bootstrapProjects(getContext());
     present("Bootstrapped project roots", { status: "ok", ...result });
   });
 
   register(COMMAND_IDS.buildFull, async () => {
-    const r = getRegistry(); if (!r) return;
+    const r = await getRegistry(); if (!r) return;
     const result = await r.buildFull(getContext());
     present("Built impact graph", { status: "ok", summary: `Full rebuild completed in ${result.elapsedMs}ms`, ...result });
   });
 
   register(COMMAND_IDS.refreshChanged, async () => {
-    const r = getRegistry(); if (!r) return;
+    const r = await getRegistry(); if (!r) return;
     const ctx = getContext();
     const result = await r.refreshChanged(ctx);
     const summary = ctx.activeFilePath
@@ -80,7 +89,7 @@ export function activate(context: vscode.ExtensionContext): void {
   });
 
   register(COMMAND_IDS.findTests, async () => {
-    const r = getRegistry(); if (!r) return;
+    const r = await getRegistry(); if (!r) return;
     const query = await prompt("Find tests for handler, API path, or file");
     if (!query) return;
     const result = r.findTests(query, getContext());
@@ -88,7 +97,7 @@ export function activate(context: vscode.ExtensionContext): void {
   });
 
   register(COMMAND_IDS.findCallers, async () => {
-    const r = getRegistry(); if (!r) return;
+    const r = await getRegistry(); if (!r) return;
     const query = await prompt("Find callers for handler or API path");
     if (!query) return;
     const result = r.findCallers(query, getContext());
@@ -96,7 +105,7 @@ export function activate(context: vscode.ExtensionContext): void {
   });
 
   register(COMMAND_IDS.explainImpact, async () => {
-    const r = getRegistry(); if (!r) return;
+    const r = await getRegistry(); if (!r) return;
     const query = await prompt("Explain impact for handler, API path, or file");
     if (!query) return;
     const result = r.explainImpact(query, getContext());
@@ -104,7 +113,7 @@ export function activate(context: vscode.ExtensionContext): void {
   });
 
   register(COMMAND_IDS.showApiMap, async () => {
-    const r = getRegistry(); if (!r) return;
+    const r = await getRegistry(); if (!r) return;
     const query = await prompt("Show API map for controller, task, test, or API path");
     if (!query) return;
     const result = r.showApiMap(query, getContext());
@@ -112,7 +121,7 @@ export function activate(context: vscode.ExtensionContext): void {
   });
 
   register(COMMAND_IDS.saveContext, async () => {
-    const r = getRegistry(); if (!r) return;
+    const r = await getRegistry(); if (!r) return;
     const name = await prompt("Context name");
     if (!name) return;
     const ctx = getContext();
@@ -126,7 +135,7 @@ export function activate(context: vscode.ExtensionContext): void {
   });
 
   register(COMMAND_IDS.loadContext, async () => {
-    const r = getRegistry(); if (!r) return;
+    const r = await getRegistry(); if (!r) return;
     const name = await prompt("Context name to load");
     if (!name) return;
     const result = r.loadContext(name, getContext());
@@ -134,7 +143,7 @@ export function activate(context: vscode.ExtensionContext): void {
   });
 
   register(COMMAND_IDS.graphStatus, async () => {
-    const r = getRegistry(); if (!r) return;
+    const r = await getRegistry(); if (!r) return;
     const result = r.graphStatus(getContext());
     present("Graph status", { status: "ok", ...result });
   });

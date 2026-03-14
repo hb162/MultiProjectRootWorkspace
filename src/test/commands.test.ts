@@ -14,9 +14,9 @@ describe("CommandRegistry", () => {
   let registry: CommandRegistry;
   let ctx: CommandContext;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cmd-test-"));
-    store = new GraphStore(tempDir);
+    store = await GraphStore.create(tempDir);
     engine = new ImpactGraphEngine(tempDir, store);
     registry = new CommandRegistry(engine, store);
     ctx = { workspaceRoot: tempDir };

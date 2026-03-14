@@ -23,18 +23,25 @@ const workspaceRoots: string | string[] = rawRoots.length === 1 ? rawRoots[0] : 
 
 let store: GraphStore | null = null;
 let engine: import("./core/engine").ImpactGraphEngine | null = null;
+// Cache the init promise to prevent duplicate initialisation on concurrent calls.
+let storeInitPromise: Promise<GraphStore> | null = null;
 
-function getStore(): GraphStore {
-  if (!store) {
-    store = new GraphStore(primaryRoot);
-  }
-  return store;
+async function getStore(): Promise<GraphStore> {
+  if (store) return store;
+  if (storeInitPromise) return storeInitPromise;
+  storeInitPromise = GraphStore.create(primaryRoot).then((s) => {
+    store = s;
+    return s;
+  });
+  return storeInitPromise;
 }
 
-function getEngine(): import("./core/engine").ImpactGraphEngine {
+async function getEngine(): Promise<import("./core/engine").ImpactGraphEngine> {
+  if (engine) return engine;
+  const s = await getStore();
   if (!engine) {
     const { ImpactGraphEngine } = require("./core/engine") as typeof import("./core/engine");
-    engine = new ImpactGraphEngine(workspaceRoots, getStore());
+    engine = new ImpactGraphEngine(workspaceRoots, s);
   }
   return engine;
 }
@@ -140,7 +147,7 @@ const TOOLS = [
 // ---------------------------------------------------------------------------
 
 async function callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
-  const s = getStore();
+  const s = await getStore();
 
   switch (name) {
     case "query_impact":
@@ -188,7 +195,8 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
     }
 
     case "build_graph": {
-      const status = await getEngine().buildAll();
+      const eng = await getEngine();
+      const status = await eng.buildAll();
       const functionCount = s.getAllFunctions().length;
       return { ...status, functions: functionCount, roots: rawRoots, message: "Graph rebuilt successfully." };
     }

@@ -13,14 +13,23 @@ interface EdgeRow extends GraphEdge {
 }
 
 export class GraphStore {
-  private readonly db: Db;
   private readonly contextDir: string;
 
-  public constructor(private readonly rootPath: string, contextDirectory = ".ai/kg/context") {
-    const dbPath = path.join(rootPath, ".ai", "kg", "index.db");
+  /** Use GraphStore.create() instead of constructing directly. */
+  private constructor(
+    private readonly rootPath: string,
+    private readonly db: Db,
+    contextDirectory = ".ai/kg/context",
+  ) {
     this.contextDir = path.join(rootPath, contextDirectory);
-    this.db = openDb(dbPath);
     this.migrate();
+  }
+
+  /** Async factory — required because openDb() is now async (sql.js fallback). */
+  public static async create(rootPath: string, contextDirectory = ".ai/kg/context"): Promise<GraphStore> {
+    const dbPath = path.join(rootPath, ".ai", "kg", "index.db");
+    const db = await openDb(dbPath);
+    return new GraphStore(rootPath, db, contextDirectory);
   }
 
   public close(): void {

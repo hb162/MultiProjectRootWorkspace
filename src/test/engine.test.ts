@@ -54,13 +54,13 @@ public class PostUserTest {
 `,
   );
 
-  const store = new GraphStore(root);
+  const store = await GraphStore.create(root);
   const engine = new ImpactGraphEngine(root, store);
   await engine.buildAll();
 
   const impact = store.getImpact("create_user");
   assert.equal(impact.apis.length, 1);
-  assert.ok(impact.tests.some((item) => item.node.name.includes("PostUserTest")));
+  assert.ok(impact.tests.some((item: { node: { name: string } }) => item.node.name.includes("PostUserTest")));
 
   store.close();
 });
