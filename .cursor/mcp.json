@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "impact-graph": {
-      "command": "node",
-      "args": ["./dist/mcp-server.js"]
-    }
-  }
-}
