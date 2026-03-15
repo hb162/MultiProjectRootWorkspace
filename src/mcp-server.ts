@@ -165,99 +165,115 @@ const TOOLS = [
 ];
 
 // ---------------------------------------------------------------------------
-// Compact Line-based Formatters (AI-optimized)
+// Grouped Compact Formatters (AI-optimized, ~45 tokens)
 // ---------------------------------------------------------------------------
 
 function getRelativePath(sourcePath: string): string {
-  // Extract last 2-3 path segments for readability
   const segments = sourcePath.split(/[/\\]/);
-  return segments.slice(-3).join("/");
+  return segments.slice(-2).join("/");
 }
 
-function formatNodeLine(prefix: string, node: GraphNode, confidence?: number): string {
-  const relPath = getRelativePath(node.sourcePath);
-  const lines = node.data?.startLine
-    ? `:${node.data.startLine}${node.data.endLine !== node.data.startLine ? `-${node.data.endLine}` : ""}`
-    : "";
-  const method = node.httpMethod ? `${node.httpMethod} ` : "";
-  const apiPath = node.normalizedPath ? `${node.normalizedPath} ` : "";
-  const conf = confidence !== undefined ? ` [${confidence.toFixed(2)}]` : "";
+function getLineSpec(node: GraphNode): string {
+  if (!node.data?.startLine) return "";
+  const start = node.data.startLine;
+  const end = node.data.endLine;
+  return end && end !== start ? `${start}-${end}` : `${start}`;
+}
+
+interface FileGroup {
+  path: string;
+  items: Array<{ name: string; lines: string }>;
+}
+
+function groupByFile(nodes: Array<{ node: GraphNode; confidence?: number }>): FileGroup[] {
+  const groups = new Map<string, FileGroup>();
   
-  return `${prefix}: ${method}${apiPath}${node.name} @ ${relPath}${lines}${conf}`;
+  for (const { node } of nodes) {
+    const relPath = getRelativePath(node.sourcePath);
+    if (!groups.has(relPath)) {
+      groups.set(relPath, { path: relPath, items: [] });
+    }
+    groups.get(relPath)!.items.push({
+      name: node.name,
+      lines: getLineSpec(node),
+    });
+  }
+  
+  return Array.from(groups.values());
+}
+
+function formatGroupedLine(groups: FileGroup[]): string {
+  return groups
+    .map((g) => {
+      const items = g.items
+        .map((i) => (i.lines ? `${i.name}:${i.lines}` : i.name))
+        .join(",");
+      return `${g.path} ${items}`;
+    })
+    .join(";");
 }
 
 function formatImpactCompact(result: ImpactResult): string {
   const lines: string[] = [];
   
-  lines.push(`IMPACT: ${result.query}`);
-  lines.push("---");
+  // Query
+  lines.push(result.query);
   
-  // APIs
-  for (const api of result.apis) {
-    lines.push(formatNodeLine("API", api));
+  // EDIT: handlers + functions (files to modify)
+  const editNodes: Array<{ node: GraphNode }> = [
+    ...result.handlers.map((h) => ({ node: h })),
+    ...(result.functions?.map((f) => ({ node: f })) ?? []),
+  ];
+  if (editNodes.length > 0) {
+    const groups = groupByFile(editNodes);
+    lines.push(`EDIT:${formatGroupedLine(groups)}`);
   }
   
-  // Handlers
-  for (const handler of result.handlers) {
-    lines.push(formatNodeLine("HANDLER", handler));
+  // TEST: test files
+  if (result.tests.length > 0) {
+    const groups = groupByFile(result.tests.map((t) => ({ node: t.node })));
+    lines.push(`TEST:${formatGroupedLine(groups)}`);
   }
   
-  // Functions (V2)
-  if (result.functions?.length) {
-    for (const func of result.functions) {
-      lines.push(formatNodeLine("FUNC", func));
-    }
+  // WARN: callers (potential breaking changes)
+  const warnNodes = [
+    ...result.callers.map((c) => ({ node: c.node })),
+    ...(result.functionCallers?.map((fc) => ({ node: fc.node })) ?? []),
+  ];
+  if (warnNodes.length > 0) {
+    const groups = groupByFile(warnNodes);
+    lines.push(`WARN:${formatGroupedLine(groups)}`);
   }
-  
-  // Function callers (V2)
-  if (result.functionCallers?.length) {
-    for (const caller of result.functionCallers) {
-      lines.push(formatNodeLine("FUNC_CALLER", caller.node, caller.confidence));
-    }
-  }
-  
-  // Callers
-  for (const caller of result.callers) {
-    lines.push(formatNodeLine("CALLER", caller.node, caller.confidence));
-  }
-  
-  // Tests
-  for (const test of result.tests) {
-    lines.push(formatNodeLine("TEST", test.node, test.confidence));
-  }
-  
-  lines.push("---");
-  lines.push(`SUMMARY: ${result.apis.length}A ${result.handlers.length}H ${result.tests.length}T ${result.callers.length}C${result.functions?.length ? ` ${result.functions.length}F` : ""}`);
   
   return lines.join("\n");
 }
 
 function formatNodesCompact(prefix: string, nodes: GraphNode[]): string {
-  if (nodes.length === 0) {
-    return `${prefix}: (none)`;
-  }
-  const lines = nodes.map((node) => formatNodeLine(prefix, node));
-  lines.push(`---`);
-  lines.push(`TOTAL: ${nodes.length}`);
-  return lines.join("\n");
+  if (nodes.length === 0) return `(none)`;
+  
+  const groups = groupByFile(nodes.map((n) => ({ node: n })));
+  const formatted = groups
+    .map((g) => {
+      const items = g.items.map((i) => (i.lines ? `${i.name}:${i.lines}` : i.name)).join(",");
+      return `${g.path} ${items}`;
+    })
+    .join("\n");
+  
+  return `${formatted}\n=${nodes.length}`;
 }
 
 function formatTestsCompact(query: string, tests: ImpactResult["tests"]): string {
-  const lines: string[] = [];
-  lines.push(`TESTS_FOR: ${query}`);
-  lines.push("---");
+  if (tests.length === 0) return `${query}\n(none)`;
   
-  if (tests.length === 0) {
-    lines.push("(none)");
-  } else {
-    for (const test of tests) {
-      lines.push(formatNodeLine("TEST", test.node, test.confidence));
-    }
-  }
+  const groups = groupByFile(tests.map((t) => ({ node: t.node })));
+  const formatted = groups
+    .map((g) => {
+      const items = g.items.map((i) => (i.lines ? `${i.name}:${i.lines}` : i.name)).join(",");
+      return `${g.path} ${items}`;
+    })
+    .join("\n");
   
-  lines.push("---");
-  lines.push(`TOTAL: ${tests.length}`);
-  return lines.join("\n");
+  return `${query}\n${formatted}\n=${tests.length}`;
 }
 
 // ---------------------------------------------------------------------------
