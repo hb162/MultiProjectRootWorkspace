@@ -41,6 +41,15 @@ export function detectLanguage(filePath: string): string {
       return "javascript";
     case ".go":
       return "go";
+    case ".conf":
+    case ".hocon":
+    case ".properties":
+      return "config";
+    case ".groovy":
+      return "groovy";
+    case ".kt":
+    case ".kts":
+      return "kotlin";
     default:
       return "unknown";
   }

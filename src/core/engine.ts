@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { FlaskAdapter } from "../adapters/flask";
 import { HttpCallsiteAdapter } from "../adapters/httpCallsites";
+import { JavaConfigResolver, VarMap } from "../adapters/javaConfigResolver";
 import { PythonAstAdapter } from "../adapters/pythonAst";
 import { GraphStore } from "./graph-store";
 import { ExtractedCallSite, ExtractedFunction, ExtractedImport, GraphEdge, GraphNode, GraphSnapshot, ProjectContext } from "./types";
@@ -20,6 +21,7 @@ export class ImpactGraphEngine {
   private readonly flaskAdapter = new FlaskAdapter();
   private readonly callsiteAdapter = new HttpCallsiteAdapter();
   private readonly pythonAstAdapter = new PythonAstAdapter();  // V2
+  private readonly javaConfigResolver = new JavaConfigResolver();  // V4
 
   public constructor(
     private readonly workspaceRoot: string | string[],
@@ -147,7 +149,11 @@ export class ImpactGraphEngine {
 
     const baseEdges: GraphEdge[] = [];
     const flask = await this.flaskAdapter.extract(project, files);
-    const callsites = await this.callsiteAdapter.extract(project, files);
+
+    // V4: Resolve Java config chain (.conf → Config.java → variable map)
+    const varMap = await this.javaConfigResolver.resolve(files);
+
+    const callsites = await this.callsiteAdapter.extract(project, files, varMap);
     const testData = await this.callsiteAdapter.extractTestData(project, files);
 
     // V2: Extract Python functions with tree-sitter
