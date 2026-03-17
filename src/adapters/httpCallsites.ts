@@ -7,8 +7,11 @@ import { VarMap } from "./javaConfigResolver";
 const HTTP_CALL_PATTERNS: Array<{ regex: RegExp; methodGroup?: number; pathGroup: number }> = [
   // .get("/path") — method call with string literal
   { regex: /\.(get|post|put|patch|delete)\(\s*["'`]([^"'`]+)["'`]/g, methodGroup: 1, pathGroup: 2 },
-  // .get(BASE + "/path") or .get(VAR + "/path") — concatenation (Serenity/RestAssured pattern)
-  { regex: /\.(get|post|put|patch|delete)\([^)'"]*\+\s*["'`](\/[^"'`]*)["'`]/g, methodGroup: 1, pathGroup: 2 },
+  // .get(BASE + "/path") or .get(VAR + "path") — concatenation (Serenity/RestAssured pattern)
+  // Fix: removed leading / requirement to match Java patterns like "ioptima-sellingcap/calculate"
+  { regex: /\.(get|post|put|patch|delete)\([^)'"]*\+\s*["'`]([^"'`]+)["'`]/g, methodGroup: 1, pathGroup: 2 },
+  // .baseUri(BASE_URL + "path").get() — Serenity/RestAssured baseUri pattern
+  { regex: /\.baseUri\([^)]*\+\s*["'`]([^"'`]+)["'`]\s*\)\s*\.\s*(get|post|put|patch|delete)\s*\(/g, methodGroup: 2, pathGroup: 1 },
   // fetch("/path", { method: "POST" })
   { regex: /\bfetch\(\s*["'`]([^"'`]+)["'`](?:\s*,\s*\{[\s\S]*?method\s*:\s*["'`](GET|POST|PUT|PATCH|DELETE)["'`][\s\S]*?\})?/g, methodGroup: 2, pathGroup: 1 },
   // GET "/path" — explicit method string
@@ -23,6 +26,13 @@ const HTTP_CALL_PATTERNS: Array<{ regex: RegExp; methodGroup?: number; pathGroup
  *   .post(BASE_URL + RiskConfig.CREATE_BOND)
  */
 const VAR_HTTP_CALL_PATTERN = /\.(get|post|put|patch|delete)\(\s*[A-Za-z_][\w.]*\s*\+\s*([A-Za-z_][\w.]*)\s*\)/g;
+
+/**
+ * Pattern for detecting API path in variable assignment with method call + string literal:
+ *   String baseUri = getDomainIrisBondV1ByType("wn") + "ioptima-sellingcap/calculate";
+ * This captures the path portion for linking to HTTP calls later.
+ */
+const VAR_ASSIGNMENT_METHOD_CALL_PATTERN = /[A-Za-z_][\w.]*\([^)]*\)\s*\+\s*["'`]([^"'`]+)["'`]/g;
 
 export class HttpCallsiteAdapter {
   public async extract(project: ProjectContext, files: string[], varMap?: VarMap): Promise<ExtractedCallSite[]> {
@@ -92,6 +102,37 @@ export class HttpCallsiteAdapter {
             });
           }
           varMatch = varPattern.exec(text);
+        }
+      }
+
+      // V5: Method call + string literal in variable assignment (Java Serenity pattern)
+      // e.g., String baseUri = getDomainIrisBondV1ByType("wn") + "ioptima-sellingcap/calculate";
+      {
+        const varAssignPattern = new RegExp(VAR_ASSIGNMENT_METHOD_CALL_PATTERN.source, VAR_ASSIGNMENT_METHOD_CALL_PATTERN.flags);
+        let vaMatch: RegExpExecArray | null = varAssignPattern.exec(text);
+        while (vaMatch) {
+          const pathLiteral = vaMatch[1]; // e.g., "ioptima-sellingcap/calculate"
+
+          // Detect HTTP method from nearby .post(), .get(), etc. in the same file
+          const httpMethodMatch = text.match(/\.(get|post|put|patch|delete)\s*\(/i);
+          const httpMethod = httpMethodMatch ? httpMethodMatch[1].toUpperCase() : undefined;
+
+          matched = true;
+          callsites.push({
+            filePath,
+            fileName: path.basename(filePath),
+            fileStem: fileStem(filePath),
+            projectId: project.id,
+            language: detectLanguage(filePath),
+            framework: this.detectFramework(filePath),
+            isTest,
+            role: isTest ? "test" : role,
+            httpMethod,
+            rawPath: pathLiteral,
+            normalizedPath: normalizeApiPath(pathLiteral),
+            references: refs,
+          });
+          vaMatch = varAssignPattern.exec(text);
         }
       }
 
